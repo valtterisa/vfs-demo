@@ -1,4 +1,4 @@
-# vfs-demo
+# agent-fs-control-plane
 
 Agentic virtual filesystem architecture demo for AI products.
 
@@ -68,7 +68,7 @@ KPIs to validate in production:
 
 ## Technical pattern (after the money case)
 
-`vfs-demo` combines:
+`agent-fs-control-plane` combines:
 
 - `Bun` + `Elysia` API
 - `Qdrant` for read-heavy knowledge paths (`/kb`)
@@ -77,6 +77,18 @@ KPIs to validate in production:
 - `AI SDK ToolLoopAgent` + `just-bash` for natural-language execution
 
 This repo is a demo, but the architectural pattern is intended for production-scale systems.
+
+## RAG vs this pattern
+
+Plain RAG is powerful for open-ended recall, but it is usually less predictable for execution workflows.  
+This pattern keeps RAG-like retrieval where useful while forcing actions through deterministic tool contracts.
+
+In practice:
+
+- plain RAG: higher flexibility, lower determinism
+- this pattern: lower flexibility, higher auditability and repeatability
+
+For enterprise systems, the common approach is hybrid: use retrieval for discovery, and deterministic tools for actions/writes.
 
 Why this pattern works:
 
