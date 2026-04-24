@@ -9,7 +9,7 @@ Use semantic retrieval to narrow candidates, then deterministic tools to do exac
 - Semantic search is good for discovery.
 - Deterministic tools are good for exact matches and writes.
 
-This reduces wasted model/tool loops and improves reliability.
+This reduces wasted model/tool loops and improves reliability. You do not need per-task VMs or heavyweight sandbox orchestration anymore after this.
 
 ## Money-first (realistic)
 
