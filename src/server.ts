@@ -20,6 +20,19 @@ const db = openDatabase(env.SQLITE_PATH);
 const fs = new HybridFileSystem(db);
 const audit = new AuditLog(db);
 
+async function serveDistFile(path: string, contentType?: string): Promise<Response | null> {
+  const file = Bun.file(path);
+  if (!(await file.exists())) {
+    return null;
+  }
+  if (contentType) {
+    return new Response(file, {
+      headers: { "content-type": contentType },
+    });
+  }
+  return new Response(file);
+}
+
 function headerValue(
   headers: Record<string, string | undefined>,
   key: string,
@@ -219,15 +232,94 @@ function createAgentTools(ctx: SessionContext) {
   };
 }
 
+type AgentStreamHooks = {
+  onToolStart?: (toolName: string, input: unknown) => void;
+  onToolResult?: (toolName: string, output: unknown) => void;
+  onToolError?: (toolName: string, error: Error) => void;
+};
+
+function createStreamingAgentTools(ctx: SessionContext, hooks: AgentStreamHooks) {
+  const ops = createOperations(ctx, "agent");
+
+  async function runWithHooks<TInput, TOutput>(
+    toolName: string,
+    input: TInput,
+    execute: () => Promise<TOutput>,
+  ): Promise<TOutput> {
+    hooks.onToolStart?.(toolName, input);
+    try {
+      const output = await execute();
+      hooks.onToolResult?.(toolName, output);
+      return output;
+    } catch (error) {
+      hooks.onToolError?.(toolName, error as Error);
+      throw error;
+    }
+  }
+
+  return {
+    ls: tool({
+      description: "List entries in a VFS path",
+      inputSchema: z.object({ path: z.string().optional() }),
+      execute: async ({ path }) => runWithHooks("ls", { path }, () => ops.ls(path)),
+    }),
+    cat: tool({
+      description: "Read a file from VFS",
+      inputSchema: z.object({ path: z.string() }),
+      execute: async ({ path }) => runWithHooks("cat", { path }, () => ops.cat(path)),
+    }),
+    write: tool({
+      description: "Write content to a writable VFS path",
+      inputSchema: z.object({ path: z.string(), content: z.string() }),
+      execute: async ({ path, content }) =>
+        runWithHooks("write", { path, content }, () => ops.write(path, content)),
+    }),
+    mkdir: tool({
+      description: "Create a directory path in writable roots",
+      inputSchema: z.object({ path: z.string() }),
+      execute: async ({ path }) => runWithHooks("mkdir", { path }, () => ops.mkdir(path)),
+    }),
+    rm: tool({
+      description: "Remove a file in writable roots",
+      inputSchema: z.object({ path: z.string() }),
+      execute: async ({ path }) => runWithHooks("rm", { path }, () => ops.rm(path)),
+    }),
+    find: tool({
+      description: "Find files recursively from a root path",
+      inputSchema: z.object({ path: z.string().optional() }),
+      execute: async ({ path }) => runWithHooks("find", { path }, () => ops.find(path)),
+    }),
+    grep: tool({
+      description: "Search file lines by regex pattern",
+      inputSchema: z.object({ pattern: z.string(), path: z.string().optional() }),
+      execute: async ({ pattern, path }) =>
+        runWithHooks("grep", { pattern, path }, () => ops.grep(pattern, path)),
+    }),
+  };
+}
+
 const app = new Elysia()
-  .get("/", () => new Response(Bun.file("public/index.html")))
-  .get(
-    "/app.js",
-    () =>
-      new Response(Bun.file("public/app.js"), {
-        headers: { "content-type": "text/javascript; charset=utf-8" },
-      }),
-  )
+  .get("/", async ({ set }) => {
+    const html = await serveDistFile("dist/index.html", "text/html; charset=utf-8");
+    if (!html) {
+      set.status = 503;
+      return "UI is not built. Run `npm run build:ui`.";
+    }
+    return html;
+  })
+  .get("/assets/*", async ({ params, set }) => {
+    const assetPath = params["*"] ?? "";
+    if (assetPath.includes("..") || assetPath.includes("\\")) {
+      set.status = 400;
+      return "Invalid asset path";
+    }
+    const asset = await serveDistFile(`dist/assets/${assetPath}`);
+    if (!asset) {
+      set.status = 404;
+      return "Not found";
+    }
+    return asset;
+  })
   .get("/health/live", () => ({ status: "ok" }))
   .get("/health/ready", async () => {
     const dbOk = db.query("SELECT 1 as ok").get() as { ok: number };
@@ -301,6 +393,81 @@ const app = new Elysia()
     { body: t.Object({ path: t.Optional(t.String()) }) },
   )
   .post(
+    "/chat/agent/stream",
+    async ({ body, headers, set }) => {
+      if (!env.ANTHROPIC_API_KEY) {
+        set.status = 400;
+        return { error: "ANTHROPIC_API_KEY is required for /chat/agent/stream" };
+      }
+      const s = sessionFromHeaders(headers);
+      const prompt = body.message.trim();
+      const encoder = new TextEncoder();
+      const stream = new ReadableStream({
+        start: async (controller) => {
+          const send = (event: string, data: unknown) => {
+            controller.enqueue(encoder.encode(`${JSON.stringify({ event, data })}\n`));
+          };
+          try {
+            send("status", { state: "started" });
+            const agent = new ToolLoopAgent({
+              model: anthropic("claude-haiku-4-5"),
+              instructions:
+                "You are a VFS assistant. Always ground answers in VFS tool output instead of memory. For factual questions, first use grep on /kb with key terms, then cat the most relevant files before answering. If no matches are found, say that clearly. Keep responses concise and plain text.",
+              tools: createStreamingAgentTools(s, {
+                onToolStart: (toolName, input) => {
+                  send("tool-start", { toolName, input });
+                },
+                onToolResult: (toolName, output) => {
+                  send("tool-result", { toolName, output });
+                },
+                onToolError: (toolName, error) => {
+                  send("tool-error", { toolName, error: error.message });
+                },
+              }),
+              stopWhen: stepCountIs(8),
+            });
+            const result = await agent.generate({ prompt });
+            logEvent(s, "agent", prompt.slice(0, 120), "ok", {
+              steps: result.steps.length,
+            });
+            send("final", {
+              answer: result.text,
+              steps: result.steps.map((step) => ({
+                text: step.text,
+                toolCalls: step.toolCalls.map((call) => ({
+                  toolName: call.toolName,
+                  input: call.input,
+                })),
+                toolResults: step.toolResults.map((toolResult) => ({
+                  toolName: toolResult.toolName,
+                  output: toolResult.output,
+                })),
+              })),
+            });
+          } catch (error) {
+            const err = error as Error;
+            logEvent(s, "agent", prompt.slice(0, 120), "error", {
+              name: err.name,
+              message: err.message,
+              stack: err.stack,
+            });
+            send("error", { message: err.message });
+          } finally {
+            controller.close();
+          }
+        },
+      });
+      return new Response(stream, {
+        headers: {
+          "content-type": "application/x-ndjson; charset=utf-8",
+          "cache-control": "no-cache",
+          connection: "keep-alive",
+        },
+      });
+    },
+    { body: t.Object({ message: t.String() }) },
+  )
+  .post(
     "/chat/agent",
     async ({ body, headers, set }) => {
       if (!env.ANTHROPIC_API_KEY) {
@@ -313,7 +480,7 @@ const app = new Elysia()
         const agent = new ToolLoopAgent({
           model: anthropic("claude-haiku-4-5"),
           instructions:
-            "You are a VFS assistant. Use tools for exact filesystem operations and keep responses concise.",
+            "You are a VFS assistant. Always ground answers in VFS tool output instead of memory. For factual questions, first use grep on /kb with key terms, then cat the most relevant files before answering. If no matches are found, say that clearly. Keep responses concise and plain text.",
           tools: createAgentTools(s),
           stopWhen: stepCountIs(8),
         });

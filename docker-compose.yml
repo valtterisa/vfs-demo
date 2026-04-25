@@ -3,10 +3,12 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
+    command: bun run start
     restart: unless-stopped
     env_file:
       - .env.local
     environment:
+      NODE_ENV: production
       PORT: 3000
       SQLITE_PATH: /data/vfs-demo.db
       DEFAULT_ROLE: admin

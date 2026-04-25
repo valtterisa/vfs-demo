@@ -6,6 +6,7 @@ RUN bun install
 FROM base AS runtime
 WORKDIR /app
 COPY . .
+RUN bun run build:ui
 RUN mkdir -p /data && chown -R bun:bun /app /data
 USER bun
 ENV NODE_ENV=production
