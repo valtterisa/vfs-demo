@@ -1,70 +1,125 @@
 # vfs-demo
 
-POSIX-first virtual filesystem runtime for AI and automation tools.
+`vfs-demo` is a local AI filesystem assistant demo.
 
-This project focuses on deterministic, policy-enforced filesystem operations.  
-It does not depend on vector databases, embeddings, or RAG to be useful.
+It combines:
+- a Bun + Elysia backend
+- a virtual filesystem (VFS) with role-based policies
+- an AI agent with filesystem tools (`ls`, `cat`, `grep`, `find`, `write`, `mkdir`, `rm`)
+- a Vite + React chat UI that streams tool usage in real time
 
-## Why this exists
+## What this system does
 
-Most agent systems eventually need exact file operations, predictable behavior, and auditability.
+You ask normal-language questions (for example about space facts), and the agent answers by using VFS tools against mounted knowledge files.
 
-This project provides a portable VFS contract that can be reused across stacks:
+The UI shows:
+- tool calls as they happen (`tool-start`, `tool-result`, `tool-error`)
+- assistant thinking trace
+- final plain-text response
 
-- POSIX-style operations for exact reads and writes
-- strict path boundaries
-- role-based access controls
-- auditable tool execution
+This makes the agent behavior inspectable instead of opaque.
 
-## Core scope
+## Why this matters
 
-In scope:
+Without tool-grounded behavior, chat agents often hallucinate or skip source verification. This system makes answers traceable to concrete file operations.
 
-- virtual roots and path policy
-- POSIX-style tool endpoints (`ls`, `cat`, `write`, `mkdir`, `rm`)
-- role-based access (`reader`, `editor`)
-- operation audit trail
+Examples:
+- **Customer support copilot**: answer policy questions from internal docs and show exactly which files/lines were used.
+- **Ops runbook assistant**: search incident notes with `grep`, summarize findings, and write follow-up notes to `/workspace`.
+- **Compliance/audit workflows**: keep an auditable trail of read/write actions per user and tenant.
+- **Research assistant over local notes**: ask natural-language questions while keeping data local under `/kb`.
+- **Agent debugging**: see in real time whether the model actually used `grep`/`cat` or tried to answer from memory.
 
-Out of scope in core:
+## Costs and cost control
 
-- vector databases
-- embedding/indexing pipelines
-- retrieval orchestration
-- RAG-specific logic
+There are two main cost buckets:
 
-Those can be integrated later by materializing content into VFS roots (for example under `/kb`).
+- **Model/API cost**: each `/chat/agent` request uses LLM tokens; longer prompts, longer outputs, and extra tool loops increase usage.
+- **Runtime cost**: CPU/memory for Bun + UI + container runtime, plus SQLite storage (typically low for this demo).
 
-## Virtual filesystem model
+Why this architecture helps control cost:
 
-- `/kb` = read-only knowledge root
-- `/workspace`, `/memory`, `/scratch` = writable tenant-scoped roots
+- **No mandatory embeddings/vector DB in core**: avoids indexing pipelines and vector storage as baseline cost.
+- **Tool-grounded retrieval from local files**: the agent can read exactly what it needs instead of sending large context blindly.
+- **Step limit (`stopWhen`)**: caps agent tool loop length to prevent runaway token/tool usage.
+- **Local KB files**: knowledge can live in `data/kb` without external retrieval fees.
 
-## API shape
+Practical cost tips:
 
-Tool-style endpoints under `/tools/*` provide deterministic POSIX-like operations.
+- Keep prompts short and specific.
+- Keep KB files concise and split by topic for targeted `grep`/`cat`.
+- Use smaller/faster models for routine queries; reserve larger models for hard tasks.
+- Monitor average tool steps per request and lower step limits if needed.
 
-Example operations:
+## Filesystem model
 
+Virtual roots:
+- `/kb` = read-only knowledge base loaded from `data/kb`
+- `/workspace`, `/memory`, `/scratch` = writable tenant-scoped roots (stored in SQLite)
+- `/tools` = virtual tool namespace
+
+Access model:
+- `viewer` can read
+- `editor` and `admin` can write in writable roots
+- writes to `/kb` are blocked
+
+## Main API endpoints
+
+Health:
+- `GET /health/live`
+- `GET /health/ready`
+
+Tool API:
 - `POST /tools/ls`
 - `POST /tools/cat`
+- `POST /tools/grep`
+- `POST /tools/find`
 - `POST /tools/write`
 - `POST /tools/mkdir`
 - `POST /tools/rm`
 
-## Run locally
+Agent API:
+- `POST /chat/agent` (non-streaming JSON response)
+- `POST /chat/agent/stream` (NDJSON streaming events for live UI updates)
+
+## Run with Docker
 
 ```bash
 docker compose up -d --build
 ```
 
-Endpoints:
+App URL:
+- `http://localhost:3000`
 
-- API: `http://localhost:3000`
-- UI: `http://localhost:3000`
-- Liveness: `GET /health/live`
-- Readiness: `GET /health/ready`
+## Run without Docker
 
-## API examples
+Install dependencies:
+
+```bash
+pnpm install
+```
+
+Build UI:
+
+```bash
+pnpm run build:ui
+```
+
+Run backend:
+
+```bash
+pnpm run start
+```
+
+Optional frontend dev server:
+
+```bash
+pnpm run dev:ui
+```
+
+## Quick API examples
+
+List root:
 
 ```bash
 curl -X POST http://localhost:3000/tools/ls \
@@ -72,29 +127,23 @@ curl -X POST http://localhost:3000/tools/ls \
   -d "{\"path\":\"/\"}"
 ```
 
+Read KB file:
+
 ```bash
 curl -X POST http://localhost:3000/tools/cat \
   -H "content-type: application/json" \
-  -d "{\"path\":\"/kb/docs/intro.md\"}"
+  -d "{\"path\":\"/kb/space/missions.md\"}"
 ```
+
+Ask the agent:
 
 ```bash
-curl -X POST http://localhost:3000/tools/write \
+curl -X POST http://localhost:3000/chat/agent \
   -H "content-type: application/json" \
-  -H "x-role: editor" \
-  -d "{\"path\":\"/workspace/notes/hello.txt\",\"content\":\"hello from vfs\"}"
+  -d "{\"message\":\"What year did Apollo 11 land on the Moon?\"}"
 ```
 
-## Integration model
+## Notes
 
-This VFS can be plugged into projects that use RAG, vector DBs, search, or custom ingestion.
-
-Recommended boundary:
-
-- external systems discover/retrieve content
-- content is mounted or written into VFS roots
-- agents and tools operate through deterministic POSIX-like VFS endpoints
-
-## Security note
-
-Write operations are restricted to writable roots, path traversal is blocked, and access is controlled by role.
+- `/kb` content is loaded from disk at server start.
+- If you change files under `data/kb`, restart/rebuild the app to ensure runtime sees updates.
