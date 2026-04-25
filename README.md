@@ -1,55 +1,60 @@
 # vfs-demo
 
-`vfs-demo` is a local AI filesystem assistant demo.
+## What
 
-It combines:
-- a Bun + Elysia backend
-- a virtual filesystem (VFS) with role-based policies
-- an AI agent with filesystem tools (`ls`, `cat`, `grep`, `find`, `write`, `mkdir`, `rm`)
-- a Vite + React chat UI that streams tool usage in real time
+`vfs-demo` is an AI chat assistant that answers questions by using filesystem tools against a controlled virtual filesystem.
 
-## What this system does
+The virtual filesystem is hybrid:
+- `/kb` is read-only knowledge loaded from local files (`data/kb`)
+- `/workspace`, `/memory`, `/scratch` are writable and stored in SQLite per tenant
 
-You ask normal-language questions (for example about space facts), and the agent answers by using VFS tools against mounted knowledge files.
+The UI shows tool usage in real time, so you can see exactly how the answer was produced.
 
-The UI shows:
-- tool calls as they happen (`tool-start`, `tool-result`, `tool-error`)
-- assistant thinking trace
-- final plain-text response
+## Why
 
-This makes the agent behavior inspectable instead of opaque.
+Most AI demos hide retrieval steps and make debugging hard.  
+This project makes answers traceable and safer:
 
-## Why this matters
+- **Traceable**: you can see `grep`/`cat`/`find` calls while the model is working
+- **Deterministic**: answers can be grounded in exact file reads, not just model memory
+- **Safer by default**: access is constrained to virtual roots with role-based permissions
+- **Lower complexity**: no mandatory vector DB or embedding pipeline for core usage
 
-Without tool-grounded behavior, chat agents often hallucinate or skip source verification. This system makes answers traceable to concrete file operations.
+## Example use cases
 
-Examples:
-- **Customer support copilot**: answer policy questions from internal docs and show exactly which files/lines were used.
-- **Ops runbook assistant**: search incident notes with `grep`, summarize findings, and write follow-up notes to `/workspace`.
-- **Compliance/audit workflows**: keep an auditable trail of read/write actions per user and tenant.
-- **Research assistant over local notes**: ask natural-language questions while keeping data local under `/kb`.
-- **Agent debugging**: see in real time whether the model actually used `grep`/`cat` or tried to answer from memory.
+- **Internal knowledge assistant**: ask questions over markdown docs and verify sources via live tool trace
+- **Support/copilot workflows**: answer policy/process questions from `/kb`, write drafts to `/workspace`
+- **Ops/runbook helper**: search incident notes, summarize findings, and store action notes
+- **Compliance-friendly assistant**: keep auditable read/write operations with tenant scoping
 
-## Costs and cost control
+## Money (costs)
 
-There are two main cost buckets:
+Main cost buckets:
 
 - **Model/API cost**: each `/chat/agent` request uses LLM tokens; longer prompts, longer outputs, and extra tool loops increase usage.
 - **Runtime cost**: CPU/memory for Bun + UI + container runtime, plus SQLite storage (typically low for this demo).
 
-Why this architecture helps control cost:
+How this architecture keeps costs down:
 
 - **No mandatory embeddings/vector DB in core**: avoids indexing pipelines and vector storage as baseline cost.
 - **Tool-grounded retrieval from local files**: the agent can read exactly what it needs instead of sending large context blindly.
 - **Step limit (`stopWhen`)**: caps agent tool loop length to prevent runaway token/tool usage.
 - **Local KB files**: knowledge can live in `data/kb` without external retrieval fees.
 
-Practical cost tips:
+Practical money-saving tips:
 
 - Keep prompts short and specific.
 - Keep KB files concise and split by topic for targeted `grep`/`cat`.
 - Use smaller/faster models for routine queries; reserve larger models for hard tasks.
 - Monitor average tool steps per request and lower step limits if needed.
+
+## Architecture
+
+It combines:
+- a Bun + Elysia backend
+- a virtual filesystem (VFS) with role-based policies
+- an AI agent with filesystem tools (`ls`, `cat`, `grep`, `find`, `write`, `mkdir`, `rm`)
+- a Vite + React chat UI that streams tool usage in real time
 
 ## Filesystem model
 
